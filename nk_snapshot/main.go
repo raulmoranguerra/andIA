@@ -302,7 +302,7 @@ func readMJPEGFrames(ctx context.Context, r io.Reader, fs *FrameStore) error {
 		}
 
 		// Consume trailing newline(s) after jpeg if present
-		_ = br.ReadByte()
+		_, _ = br.ReadByte()
 		// best-effort put it back if not newline
 		// (we ignore; stream keeps going)
 
