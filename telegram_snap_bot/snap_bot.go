@@ -18,7 +18,6 @@ type Config struct {
 	BotToken     string
 	ChatID       int64
 	SnapshotURL  string
-	PicoclawPath string
 	DescribeCmd  string
 }
 
@@ -33,6 +32,13 @@ type TelegramResponse struct {
 			} `json:"chat"`
 		} `json:"message"`
 	} `json:"result"`
+}
+
+type DescribeResult struct {
+	Ok          bool   `json:"ok"`
+	ImagePath   string `json:"image_path"`
+	Description string `json:"description"`
+	Error       string `json:"error"`
 }
 
 func mustEnv(key string) string {
@@ -155,31 +161,31 @@ func getUpdates(cfg Config, offset int) (TelegramResponse, error) {
 	return tr, err
 }
 
-func saveTempSnapshot(jpeg []byte) (string, error) {
-	path := "/tmp/telegram-ver-snapshot.jpg"
-	err := os.WriteFile(path, jpeg, 0600)
-	return path, err
-}
-
-func describeImage(cfg Config, imgPath string) (string, error) {
-	cmd := exec.Command(cfg.DescribeCmd, imgPath)
-	cmd.Env = append(os.Environ(), "PICOCLAW_PATH="+cfg.PicoclawPath)
-
+func runDescribeScript(cfg Config) (DescribeResult, error) {
+	cmd := exec.Command(cfg.DescribeCmd)
 	out, err := cmd.CombinedOutput()
-	text := strings.TrimSpace(string(out))
+
+	var result DescribeResult
+	parseErr := json.Unmarshal(out, &result)
+	if parseErr != nil {
+		return DescribeResult{}, fmt.Errorf("script output is not valid JSON: %s", strings.TrimSpace(string(out)))
+	}
 
 	if err != nil {
-		if text == "" {
-			text = err.Error()
+		if result.Error != "" {
+			return result, fmt.Errorf(result.Error)
 		}
-		return text, err
+		return result, err
 	}
 
-	if text == "" {
-		return "Picoclaw no devolvió ninguna descripción.", nil
+	if !result.Ok {
+		if result.Error != "" {
+			return result, fmt.Errorf(result.Error)
+		}
+		return result, fmt.Errorf("unknown describe script error")
 	}
 
-	return text, nil
+	return result, nil
 }
 
 func handleSnap(cfg Config) {
@@ -216,27 +222,25 @@ func handleVer(cfg Config) {
 
 	_ = sendPhoto(cfg, jpeg, "Captura actual")
 
-	imgPath, err := saveTempSnapshot(jpeg)
+	result, err := runDescribeScript(cfg)
 	if err != nil {
-		_ = sendMessage(cfg, "No pude guardar la captura temporal: "+err.Error())
+		_ = sendMessage(cfg, "Error describiendo la imagen: "+err.Error())
 		return
 	}
 
-	desc, err := describeImage(cfg, imgPath)
-	if err != nil {
-		_ = sendMessage(cfg, "Error describiendo la imagen: "+desc)
+	if strings.TrimSpace(result.Description) == "" {
+		_ = sendMessage(cfg, "No se obtuvo descripción.")
 		return
 	}
 
-	_ = sendMessage(cfg, desc)
+	_ = sendMessage(cfg, result.Description)
 }
 
 func main() {
 	cfg := Config{
-		BotToken:     mustEnv("TG_BOT_TOKEN"),
-		SnapshotURL:  getenv("SNAPSHOT_URL", "http://127.0.0.1:18080/snapshot.jpg"),
-		PicoclawPath: getenv("PICOCLAW_PATH", "/bin/picoclaw-cli"),
-		DescribeCmd:  getenv("DESCRIBE_CMD", "/root/nk-agent/describe-image.sh"),
+		BotToken:    mustEnv("TG_BOT_TOKEN"),
+		SnapshotURL: getenv("SNAPSHOT_URL", "http://127.0.0.1:18080/snapshot.jpg"),
+		DescribeCmd: getenv("DESCRIBE_CMD", "/root/nk-agent/bin/picoclaw-see-json.sh"),
 	}
 
 	chatID, err := strconv.ParseInt(mustEnv("TG_CHAT_ID"), 10, 64)
@@ -260,11 +264,7 @@ func main() {
 				offset = update.UpdateID + 1
 			}
 
-			if update.Message == nil {
-				continue
-			}
-
-			if update.Message.Chat.ID != cfg.ChatID {
+			if update.Message == nil || update.Message.Chat.ID != cfg.ChatID {
 				continue
 			}
 
