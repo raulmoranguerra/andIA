@@ -8,15 +8,18 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 )
 
 type Config struct {
-	BotToken    string
-	ChatID      int64
-	SnapshotURL string
+	BotToken     string
+	ChatID       int64
+	SnapshotURL  string
+	PicoclawPath string
+	DescribeCmd  string
 }
 
 type TelegramResponse struct {
@@ -152,6 +155,33 @@ func getUpdates(cfg Config, offset int) (TelegramResponse, error) {
 	return tr, err
 }
 
+func saveTempSnapshot(jpeg []byte) (string, error) {
+	path := "/tmp/telegram-ver-snapshot.jpg"
+	err := os.WriteFile(path, jpeg, 0600)
+	return path, err
+}
+
+func describeImage(cfg Config, imgPath string) (string, error) {
+	cmd := exec.Command(cfg.DescribeCmd, imgPath)
+	cmd.Env = append(os.Environ(), "PICOCLAW_PATH="+cfg.PicoclawPath)
+
+	out, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(string(out))
+
+	if err != nil {
+		if text == "" {
+			text = err.Error()
+		}
+		return text, err
+	}
+
+	if text == "" {
+		return "Picoclaw no devolvió ninguna descripción.", nil
+	}
+
+	return text, nil
+}
+
 func handleSnap(cfg Config) {
 	jpeg, contentType, err := getSnapshot(cfg.SnapshotURL)
 	if err != nil {
@@ -171,10 +201,42 @@ func handleSnap(cfg Config) {
 	}
 }
 
+func handleVer(cfg Config) {
+	jpeg, contentType, err := getSnapshot(cfg.SnapshotURL)
+	if err != nil {
+		_ = sendMessage(cfg, "Error obteniendo snapshot: "+err.Error())
+		return
+	}
+
+	if !strings.Contains(strings.ToLower(contentType), "image/jpeg") &&
+		!strings.Contains(strings.ToLower(contentType), "image/") {
+		_ = sendMessage(cfg, "El endpoint no devolvió una imagen válida. Content-Type: "+contentType)
+		return
+	}
+
+	_ = sendPhoto(cfg, jpeg, "Captura actual")
+
+	imgPath, err := saveTempSnapshot(jpeg)
+	if err != nil {
+		_ = sendMessage(cfg, "No pude guardar la captura temporal: "+err.Error())
+		return
+	}
+
+	desc, err := describeImage(cfg, imgPath)
+	if err != nil {
+		_ = sendMessage(cfg, "Error describiendo la imagen: "+desc)
+		return
+	}
+
+	_ = sendMessage(cfg, desc)
+}
+
 func main() {
 	cfg := Config{
-		BotToken:    mustEnv("TG_BOT_TOKEN"),
-		SnapshotURL: getenv("SNAPSHOT_URL", "http://127.0.0.1:18080/snapshot.jpg"),
+		BotToken:     mustEnv("TG_BOT_TOKEN"),
+		SnapshotURL:  getenv("SNAPSHOT_URL", "http://127.0.0.1:18080/snapshot.jpg"),
+		PicoclawPath: getenv("PICOCLAW_PATH", "/bin/picoclaw-cli"),
+		DescribeCmd:  getenv("DESCRIBE_CMD", "/root/nk-agent/describe-image.sh"),
 	}
 
 	chatID, err := strconv.ParseInt(mustEnv("TG_CHAT_ID"), 10, 64)
@@ -206,12 +268,14 @@ func main() {
 				continue
 			}
 
-			text := strings.TrimSpace(update.Message.Text)
+			text := strings.TrimSpace(strings.ToLower(update.Message.Text))
 			switch text {
 			case "/snap", "/capture":
 				handleSnap(cfg)
+			case "/ver":
+				handleVer(cfg)
 			case "/start":
-				_ = sendMessage(cfg, "Bot activo. Usa /snap para recibir una captura.")
+				_ = sendMessage(cfg, "Bot activo. Usa /snap para captura y /ver para captura + descripción.")
 			}
 		}
 
